@@ -31,12 +31,16 @@ class FMF():
 		self.fmf_base_url = None
 		self.contacts = None
 		self.fmf_map = None
+		self.first_run = True
 
 		#cached info
-		if os.path.isfile("./contacts.json"):
-			self.contacts = self.persistant_read("./contacts.json")
-		if os.path.isfile("./fmf.json"):
-			self.fmf_map = self.persistant_read("./fmf.json")
+		self.path = os.path.dirname(os.path.abspath(__file__))
+		self.cpath = os.path.join(self.path, "contacts.json")
+		self.fpath = os.path.join(self.path, "fmf.json")
+		if os.path.isfile(self.cpath):
+			self.contacts = self.persistant_read(self.cpath)
+		if os.path.isfile(self.fpath):
+			self.fmf_map = self.persistant_read(self.fpath)
 
 	def persistant_write(self, fname, data):
 		#data is a dictionary
@@ -71,6 +75,11 @@ class FMF():
 		#bad code practice. If LAN is down then it will hit the exception case
 		#if apple server is down then itll get stuck in while loop and try with exponential backoff
 		while rheader == None and data == None:
+			#just in case
+			if count > max_tries:
+				print "Max tries reached"
+				return None, None
+
 			try:
 				rheader, data = self.http.request(url, "POST", 
 							headers=headers,
@@ -82,12 +91,11 @@ class FMF():
 				rheader, data = None, None
 				time.sleep(wait_time)
 				continue
-			#just in case
-			if count > max_tries:
-				print "Max tries reached"
-				if exp_time <= 16384: #lowest freq is ~ once per hr for apple server to come up
-					exp_time *= 2
-					count = 0
+
+			#exponential back off
+			if exp_time <= 16384: #lowest freq is ~ once per hr for apple server to come up
+				exp_time *= 2
+				count = 0
 			count += 1
 			time.sleep(exp_time)
 
@@ -174,61 +182,70 @@ class FMF():
 		#get contacts
 		name2id = {}
 		tmp = []
-		for contact in data["contactDetails"]:
-			name = contact["firstName"] + " " + contact["lastName"]
-			name2id[name] = contact["id"]
-			tmp.append(contact["id"])
+		if "contactDetails" in data:
+			for contact in data["contactDetails"]:
+				name = contact["firstName"] + " " + contact["lastName"]
+				name2id[name] = contact["id"]
+				tmp.append(contact["id"])
 		ids = set(tmp)
 
 		#get locations
 		#k: id
 		#v: [timestamp(ms), country, streetname, streetaddress, coutnrycode, locality, statecode, administrativearea]
 		fmf_map = {}
-		for location in data["locations"]:
-			if location["location"]:
-				timestamp = str(location["location"]["timestamp"])
-				address = location["location"]["address"]
-				if address:
-					try:
-						country = address["country"]
-						countrycode = address["countryCode"]
-						statecode = address["stateCode"]
-						administrativearea = address["administrativeArea"]
-						locality = address["locality"]
-						streetname = address["streetName"]
-						streetaddress = address["streetAddress"]
-
-						fmf_map[location["id"]] = [timestamp, country, streetname, streetaddress, countrycode, locality, statecode, administrativearea]
-					except KeyError:
-						#add resolution tiers later
-						pass
-				continue #sometimes address isn't ready yet
+		if "locations" in data:
+			for location in data["locations"]:
+				if location["location"]:
+					timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(location["location"]["timestamp"])/1000))
+					address = location["location"]["address"]
+					if address:
+						fmf_map[location["id"]] = [timestamp, address]
+					continue #sometimes address isn't ready yet
 
 		return ids, name2id, fmf_map
 
-	def find(self, tries=5, wait_time=3):
-		#run init first
-		ids, contacts, fmf_map = self.refresh(init=True)
+	def find(self, tries=7, min_tries=2, wait_time=3):
+		if self.first_run:
+			#run init first
+			ids, self.contacts, self.fmf_map = self.refresh(init=True)
 
-		for _ in range(tries):
-			if set(fmf_map.keys()) == ids:
-				break
-			ids, contacts, new_fmf_map = self.refresh()
+		for i in range(tries):
+			new_ids, new_contacts, new_fmf_map = self.refresh()
+
+			#update if anything changed in contacts
+			self.contacts.update(new_contacts)
+
+			different = False
+			#check if anything changed in fmf_map
 			for f in new_fmf_map:
-				fmf_map[f] = new_fmf_map[f]
+				#checks if anything changed
+				if f in self.fmf_map:
+					if new_fmf_map[f][1] != self.fmf_map[f][1]:
+						self.fmf_map[f] = new_fmf_map[f]
+						different = True
+				#new_fmf_map has something new
+				else:
+					self.fmf_map[f] = new_fmf_map[f]
+					different = True
+
+			#nothing changed and not the first run
+			if not different and i >= min_tries:
+				print "nothing changed"
+				break
+
 			time.sleep(wait_time)
 
-		self.persistant_write("contacts.json", contacts)
-		self.persistant_write("fmf.json", fmf_map)
+		self.persistant_write(self.cpath, new_contacts)
+		self.persistant_write(self.fpath, new_fmf_map)
 
-		self.contacts = contacts
-		self.fmf_map = fmf_map
+		self.contacts = new_contacts
+		self.fmf_map = new_fmf_map
 
 	def get_user(self, user, hook=None):
 		#use hooks as functions to run other utilities with that information
 		if user in self.contacts:
 			result = self.fmf_map[self.contacts[user]]
-			print result
+			# print result
 			if hook:
 				hook(user, result)
 			return result
