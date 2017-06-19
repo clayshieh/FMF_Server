@@ -235,11 +235,9 @@ class FMF():
 
 			time.sleep(wait_time)
 
-		self.persistant_write(self.cpath, new_contacts)
-		self.persistant_write(self.fpath, new_fmf_map)
+		self.persistant_write(self.cpath, self.contacts)
+		self.persistant_write(self.fpath, self.fmf_map)
 
-		self.contacts = new_contacts
-		self.fmf_map = new_fmf_map
 
 	def get_user(self, user, hook=None):
 		#use hooks as functions to run other utilities with that information
