@@ -4,8 +4,11 @@
 # Referenced Vladimir Smirnov's iCloud API Implementation code for general iCloud authentication workflow and cookie implementation
 # https://github.com/mindcollapse/iCloud-API/
 
-import os, httplib2, uuid, json, time
-from Cookie import SimpleCookie
+import os
+import uuid
+import json
+import time
+import requests
 
 class FMFException(Exception):
 	def __init__(self, value):
@@ -16,24 +19,24 @@ class FMFException(Exception):
 
 class FMF():
 	def __init__(self, aid, password):
-		#credentials
+		# credentials
 		self.aid = aid
 		self.password = password
 		self.build_id = "17DProject104"
 		self.client_id = str(uuid.uuid1()).upper()
 		self.dsid = None
 
-		#connection
-		self.cookies = SimpleCookie()
-		self.http = httplib2.Http()
+		# connection
+		self.cookies = None
+		self.http = requests.Session()
 
-		#local
+		# local
 		self.fmf_base_url = None
 		self.contacts = None
 		self.fmf_map = None
 		self.first_run = True
 
-		#cached info
+		# cached info
 		self.path = os.path.dirname(os.path.abspath(__file__))
 		self.cpath = os.path.join(self.path, "contacts.json")
 		self.fpath = os.path.join(self.path, "fmf.json")
@@ -51,22 +54,18 @@ class FMF():
 		with open(fname, 'r') as f:
 			return json.load(f)
 
-	# referenced code
-	def prepare_cookies(self):
-		return self.cookies.output(sep=";", attrs=["value"], header="").strip()
-
-	# referenced code
-	def update_cookies(self, header):
-		if "set-cookie" in header:
-			hcookies = header["set-cookie"]
-			tmp = SimpleCookie()
-			tmp.load(hcookies)
-
-			for cookie in tmp:
-				self.cookies[cookie] = tmp[cookie].value
+	def update_cookies(self, r):
+		self.cookies = r.cookies
 
 	def request(self, url, method="GET", headers=None, body=None, wait_time=10):
-		rheader, data = None, None
+
+		# requests function lookup
+		functions = {
+			"POST": self.http.post,
+			"GET": self.http.get
+		}
+
+		r = None
 
 		count = 0
 		max_tries = 3
@@ -74,21 +73,18 @@ class FMF():
 
 		#bad code practice. If LAN is down then it will hit the exception case
 		#if apple server is down then itll get stuck in while loop and try with exponential backoff
-		while rheader == None and data == None:
+		while not r:
 			#just in case
 			if count > max_tries:
 				print "Max tries reached"
-				return None, None
+				return None
 
 			try:
-				rheader, data = self.http.request(url, "POST", 
-							headers=headers,
-							body=body
-						)
+				r = functions[method](url, headers=headers, json=body, cookies=self.cookies)
 			except Exception as e:
 				print "Error in request"
 				print e
-				rheader, data = None, None
+				r = None
 				time.sleep(wait_time)
 				continue
 
@@ -99,7 +95,7 @@ class FMF():
 			count += 1
 			time.sleep(exp_time)
 
-		return rheader, data
+		return r
 
 
 	def get_service_url(self, resp, service):
@@ -122,8 +118,7 @@ class FMF():
 
 		headers = {
 			"Origin":"https://www.icloud.com", 
-			"Referer":"https://www.icloud.com", 
-			"Cookie":self.prepare_cookies()
+			"Referer":"https://www.icloud.com"
 		}
 
 		data = {
@@ -132,14 +127,11 @@ class FMF():
 			"extended_login":False
 		}
 
-		rheader, data = self.request(auth_url, "POST", 
-						headers=headers,
-						body=json.dumps(data)
-					)
+		r = self.request(auth_url, "POST", headers=headers, body=data)
 
-		self.update_cookies(rheader)
+		self.update_cookies(r)
 
-		auth_resp = json.loads(data)
+		auth_resp = r.json()
 		self.get_dsid(auth_resp)
 		self.get_service_url(auth_resp, "fmf")
 
@@ -152,8 +144,7 @@ class FMF():
 
 		headers = {
 			"Origin":"https://www.icloud.com",
-			"Referer":"https://www.icloud.com",
-			"Cookie":self.prepare_cookies()
+			"Referer":"https://www.icloud.com"
 		}
 
 		data = {
@@ -168,26 +159,23 @@ class FMF():
 
 		fmf_url = fmf_url.format(self.fmf_base_url, action, self.build_id, self.client_id, self.dsid)
 
-		rheader, data = self.request(fmf_url, "POST", 
+		r = self.request(fmf_url, "POST", 
 						headers=headers,
-						body=json.dumps(data)
+						body=data
 					)
 
 		#update the cookies
-		self.update_cookies(rheader)
+		self.update_cookies(r)
 
 		#process data
-		data = json.loads(data)
+		data = r.json()
 
 		#get contacts
 		name2id = {}
-		tmp = []
 		if "contactDetails" in data:
 			for contact in data["contactDetails"]:
 				name = contact["firstName"] + " " + contact["lastName"]
 				name2id[name] = contact["id"]
-				tmp.append(contact["id"])
-		ids = set(tmp)
 
 		#get locations
 		#k: id
@@ -202,18 +190,25 @@ class FMF():
 						fmf_map[location["id"]] = [timestamp, address]
 					continue #sometimes address isn't ready yet
 
-		return ids, name2id, fmf_map
+		return name2id, fmf_map
 
 	def find(self, tries=7, min_tries=2, wait_time=3):
 		if self.first_run:
 			#run init first
-			ids, self.contacts, self.fmf_map = self.refresh(init=True)
+			self.contacts, self.fmf_map = self.refresh(init=True)
 
 		for i in range(tries):
-			new_ids, new_contacts, new_fmf_map = self.refresh()
+			new_contacts, new_fmf_map = self.refresh()
 
 			#update if anything changed in contacts
-			self.contacts.update(new_contacts)
+			if new_contacts != self.contacts:
+				print "contacts are different"
+				print "old contacts"
+				print self.contacts
+				self.contacts.update(new_contacts)
+				print "updated contacts"
+				print self.contacts
+
 
 			different = False
 			#check if anything changed in fmf_map
@@ -242,10 +237,12 @@ class FMF():
 	def get_user(self, user, hook=None):
 		#use hooks as functions to run other utilities with that information
 		if user in self.contacts:
-			result = self.fmf_map[self.contacts[user]]
-			# print result
-			if hook:
-				hook(user, result)
-			return result
-		print "User not in contacts"
+			if self.contacts[user] in self.fmf_map:
+				result = self.fmf_map[self.contacts[user]]
+				# print result
+				if hook:
+					hook(user, result)
+				return result
+		print "User {0} not in contacts".format(self.contacts[user])
+		self.refresh()
 		return None
