@@ -135,14 +135,14 @@ class FMF():
 		auth_url = auth_url.format(self.build_id, self.client_id)
 
 		headers = {
-			"Origin":"https://www.icloud.com", 
-			"Referer":"https://www.icloud.com"
+			"Origin": "https://www.icloud.com",
+			"Referer": "https://www.icloud.com"
 		}
 
 		data = {
-			"apple_id":self.aid, 
-			"password":self.password, 
-			"extended_login":False
+			"apple_id": self.aid,
+			"password": self.password,
+			"extended_login": False
 		}
 
 		r = self.request(auth_url, "POST", headers=headers, body=data)
@@ -241,7 +241,7 @@ class FMF():
 					different = True
 
 			# nothing changed and not the first run
-			if not different and i >= min_tries:
+			if not different and i > min_tries - 1:
 				self.logger.info("nothing changed")
 				break
 
